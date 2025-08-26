@@ -7,7 +7,7 @@ public class GrassGenerator : MonoBehaviour
     public Mesh grassMesh;
     public int subMeshIndex = 0;
     public Material grassMaterial;
-    public int GrassCountPerRaw = 300;//每行草的数量
+    public int GrassCountPerRaw = 150;//每行草的数量
     public DepthTextureGenerator depthTextureGenerator;
     public ComputeShader compute;//剔除的ComputeShader
 
@@ -19,9 +19,28 @@ public class GrassGenerator : MonoBehaviour
     ComputeBuffer grassMatrixBuffer;//所有草的世界坐标矩阵
     ComputeBuffer cullResultBuffer;//剔除后的结果
 
+    public Vector2 positionJitterRange = new Vector2(-0.4f, 0.4f); // 每株在XZ平面随机偏移的范围（米）
+    public Vector2 rotationYRange = new Vector2(0f, 360f);         // 绕Y随机旋转范围（度）
+    public Vector2 uniformScaleRange = new Vector2(1.0f, 1.0f);
+    public int randomSeed = 12345;
+
     uint[] args = new uint[5] { 0, 0, 0, 0, 0 };
 
     int cullResultBufferId, vpMatrixId, positionBufferId, hizTextureId;
+
+    static uint Hash_u32(uint x)
+    {
+        x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16;
+        return x;
+    }
+
+    static float Hash01(int i, int j, int seed, int stream = 0)
+    {
+        uint h = (uint)(i * 374761393u) ^ (uint)(j * 668265263u) ^ (uint)(seed) ^ (uint)(stream * 0x9E3779B9u);
+        return (Hash_u32(h) & 0x00FFFFFF) / (float)0x01000000; // 24bit -> [0,1)
+    }
+
+    static float RandRange(float min, float max, float r01) => min + (max - min) * r01;
 
     void Start()
     {
@@ -84,8 +103,31 @@ public class GrassGenerator : MonoBehaviour
         for(int i = 0; i < GrassCountPerRaw; i++) {
             for(int j = 0; j < GrassCountPerRaw; j++) {
                 Vector2 xz = new Vector2(widthStart + step * i, widthStart + step * j);
-                Vector3 position = new Vector3(xz.x, GetGroundHeight(xz), xz.y);
-                grassMatrixs[i * GrassCountPerRaw + j] = Matrix4x4.TRS(position, Quaternion.identity, Vector3.one);
+                Vector3 basePos = new Vector3(xz.x, GetGroundHeight(xz), xz.y);
+
+                // ---- 确定性随机：为每株生成三个随机数流 ----
+                float rPosX = Hash01(i, j, randomSeed, 0);
+                float rPosZ = Hash01(i, j, randomSeed, 1);
+                float rRotY = Hash01(i, j, randomSeed, 2);
+                float rScale = Hash01(i, j, randomSeed, 3);
+
+                // 偏移（在XZ平面内）
+                float jx = RandRange(positionJitterRange.x, positionJitterRange.y, rPosX);
+                float jz = RandRange(positionJitterRange.x, positionJitterRange.y, rPosZ);
+                Vector3 jitteredPos = new Vector3(basePos.x + jx, basePos.y, basePos.z + jz);
+
+                // 再次贴地（可选，若地形起伏大，偏移后重新采高度）
+                jitteredPos.y = GetGroundHeight(new Vector2(jitteredPos.x, jitteredPos.z));
+
+                // 绕Y随机旋转
+                float rotY = RandRange(rotationYRange.x, rotationYRange.y, rRotY);
+                Quaternion rot = Quaternion.Euler(0f, rotY, 0f);
+
+                // 等比缩放（可选）
+                float s = RandRange(uniformScaleRange.x, uniformScaleRange.y, rScale);
+                Vector3 scale = new Vector3(s, s, s);
+
+                grassMatrixs[i * GrassCountPerRaw + j] = Matrix4x4.TRS(jitteredPos, rot, scale);
             }
         }
         grassMatrixBuffer.SetData(grassMatrixs);
